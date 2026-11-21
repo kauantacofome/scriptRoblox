@@ -1,5 +1,5 @@
 -- language: Lua, target: Roblox client (executor), game: SP Team FPS
--- script completo: painel, aimbot, esp, fov visual, no recoil agressivo (hook de arma)
+-- versão anti-crash: loops otimizados, sem varredura pesada por frame
 
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
@@ -19,30 +19,31 @@ local State = {
     ShowFOV    = true,
 }
 
+local AimbotConfig = {
+    FOV = 150,
+    Smoothness = 0.25,
+    TargetPart = "Head",
+    VisibleOnly = false,
+}
+
 -- ============================================================
--- NO RECOIL
+-- NO RECOIL (Otimizado: roda a cada 0.5s em vez de todo frame)
 -- ============================================================
+local lastRecoilCheck = 0
 local function tickNoRecoil()
     if not State.NoRecoil then return end
+    local now = tick()
+    if now - lastRecoilCheck < 0.5 then return end
+    lastRecoilCheck = now
 
     local char = LocalPlayer.Character
     if not char then return end
-
-    -- 1. Limpa o offset do Humanoid
+    
+    -- Limpa offset
     local hum = char:FindFirstChildOfClass("Humanoid")
     if hum then hum.CameraOffset = Vector3.new(0, 0, 0) end
 
-    -- 2. Destrói forças de câmera (CameraShaker)
-    local cam = workspace.CurrentCamera
-    if cam then
-        for _, v in pairs(cam:GetChildren()) do
-            if v:IsA("BindableEvent") and (v.Name:lower():find("shake") or v.Name:lower():find("recoil")) then
-                v:Destroy()
-            end
-        end
-    end
-
-    -- 3. Zera valores de spread/recoil na arma equipada
+    -- Limpa valores da arma (só checa a cada 0.5s pra não fritar a CPU)
     local tool = char:FindFirstChildOfClass("Tool")
     if tool then
         for _, obj in pairs(tool:GetDescendants()) do
@@ -59,13 +60,6 @@ end
 -- ============================================================
 -- AIMBOT
 -- ============================================================
-local AimbotConfig = {
-    FOV = 150,
-    Smoothness = 0.25,
-    TargetPart = "Head",
-    VisibleOnly = false,
-}
-
 local function getAimbotTarget()
     local cam = workspace.CurrentCamera
     local myChar = LocalPlayer.Character
@@ -123,7 +117,7 @@ local function tickAimbot()
 end
 
 -- ============================================================
--- ESP OTIMIZADO
+-- ESP OTIMIZADO (Cache limpo, timer de 0.2s)
 -- ============================================================
 local espFolder = Instance.new("Folder")
 espFolder.Name = "SmithESP"
@@ -138,6 +132,15 @@ end
 
 local espCache = {}
 
+local function removeESP(char)
+    local entry = espCache[char]
+    if not entry then return end
+    for _, obj in pairs(entry) do
+        if typeof(obj) == "Instance" then obj:Destroy() end
+    end
+    espCache[char] = nil
+end
+
 local function applyESP(char)
     if not char or espCache[char] then return end
     if char == LocalPlayer.Character then return end
@@ -147,17 +150,14 @@ local function applyESP(char)
     local color = getColor(char)
 
     local highlight = Instance.new("Highlight")
-    highlight.Name = "SmithESP_HL"
     highlight.Adornee = char
     highlight.FillColor = color
     highlight.FillTransparency = 0.5
     highlight.OutlineColor = color
-    highlight.OutlineTransparency = 0
     highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     highlight.Parent = espFolder
 
     local billboard = Instance.new("BillboardGui")
-    billboard.Name = "SmithESP_BB"
     billboard.Adornee = head
     billboard.Size = UDim2.new(0, 100, 0, 20)
     billboard.StudsOffset = Vector3.new(0, 2, 0)
@@ -171,7 +171,6 @@ local function applyESP(char)
     label.TextStrokeTransparency = 0
     label.Font = Enum.Font.Code
     label.TextSize = 12
-    label.Text = char.Name
     label.Parent = billboard
 
     local tracer = Instance.new("LineHandleAdornment")
@@ -180,19 +179,9 @@ local function applyESP(char)
     tracer.Thickness = 1
     tracer.Color3 = color
     tracer.AlwaysOnTop = true
-    tracer.ZIndex = 999
     tracer.Parent = espFolder
 
     espCache[char] = { hl = highlight, bb = billboard, lb = label, tr = tracer }
-end
-
-local function removeESP(char)
-    local entry = espCache[char]
-    if not entry then return end
-    if entry.hl then entry.hl:Destroy() end
-    if entry.bb then entry.bb:Destroy() end
-    if entry.tr then entry.tr:Destroy() end
-    espCache[char] = nil
 end
 
 local espTick = 0
@@ -205,12 +194,15 @@ local function updateESP()
     end
 
     local now = tick()
-    if now - espTick < 0.1 then return end
+    if now - espTick < 0.2 then return end -- atualiza a cada 200ms (5 FPS de update no esp)
     espTick = now
 
+    -- Scan de players
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr ~= LocalPlayer and plr.Character then applyESP(plr.Character) end
     end
+
+    -- Scan de NPCs (só os filhos diretos do workspace, rápido)
     for _, model in ipairs(workspace:GetChildren()) do
         if model:IsA("Model") and model:FindFirstChild("Humanoid") and model:FindFirstChild("Head") then
             if not Players:GetPlayerFromCharacter(model) then applyESP(model) end
@@ -224,26 +216,27 @@ local function updateESP()
     for char, entry in pairs(espCache) do
         if not char.Parent or not char:FindFirstChild("Head") then
             removeESP(char)
-            continue
-        end
-        local head = char.Head
-        if myRoot then
-            local dist = (head.Position - myRoot.Position).Magnitude
-            entry.lb.Text = string.format("%s [%dm]", char.Name, math.floor(dist))
-        end
-        if State.Tracers and head then
-            local screenPos, onScreen = cam:WorldToViewportPoint(head.Position)
-            if onScreen then
-                entry.tr.Visible = true
-                entry.tr.Adornee = nil
-                entry.tr.Position = UDim2.fromOffset(screenCenter.X, screenCenter.Y)
-                entry.tr.Length = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
-                entry.tr.Rotation = math.deg(math.atan2(screenPos.Y - screenCenter.Y, screenPos.X - screenCenter.X)) + 90
+        else
+            local head = char.Head
+            if myRoot then
+                local dist = (head.Position - myRoot.Position).Magnitude
+                entry.lb.Text = string.format("%s [%dm]", char.Name, math.floor(dist))
+            end
+            
+            if State.Tracers then
+                local screenPos, onScreen = cam:WorldToViewportPoint(head.Position)
+                if onScreen then
+                    entry.tr.Visible = true
+                    entry.tr.Adornee = nil
+                    entry.tr.Position = UDim2.fromOffset(screenCenter.X, screenCenter.Y)
+                    entry.tr.Length = (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude
+                    entry.tr.Rotation = math.deg(math.atan2(screenPos.Y - screenCenter.Y, screenPos.X - screenCenter.X)) + 90
+                else
+                    entry.tr.Visible = false
+                end
             else
                 entry.tr.Visible = false
             end
-        else
-            entry.tr.Visible = false
         end
     end
 end
@@ -289,14 +282,13 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -- ============================================================
--- GUI
+-- GUI E FOV
 -- ============================================================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "SmithPanel"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = CoreGui
 
--- FOV CIRCLE
 local fovCircle = Instance.new("Frame")
 fovCircle.Name = "SmithFOV"
 fovCircle.BackgroundTransparency = 1
@@ -314,13 +306,13 @@ fovStroke.Transparency = 0.5
 fovStroke.Parent = fovCircle
 
 local function updateFOVCircle()
-    local cam = workspace.CurrentCamera
-    if not cam or not State.ShowFOV then
+    if not State.ShowFOV then
         fovCircle.Visible = false
         return
     end
     fovCircle.Visible = true
-    
+    local cam = workspace.CurrentCamera
+    if not cam then return end
     local center = cam.ViewportSize / 2
     local diameter = AimbotConfig.FOV * 2
     fovCircle.Size = UDim2.fromOffset(diameter, diameter)
@@ -534,11 +526,7 @@ makeToggle("Noclip",      "Noclip",   function(v) end)
 makeToggle("No Recoil",   "NoRecoil", function(v) end)
 
 RunService.RenderStepped:Connect(function()
-    if State.ShowFOV then
-        updateFOVCircle()
-    else
-        fovCircle.Visible = false
-    end
+    if State.ShowFOV then updateFOVCircle() end
 end)
 
 toggleBtn.MouseButton1Click:Connect(function()
@@ -564,4 +552,4 @@ UserInputService.InputEnded:Connect(function(input)
     end
 end)
 
-print("[SMITH] script carregado. no recoil agressivo ativo.")
+print("[SMITH] script carregado (anti-crash).")
